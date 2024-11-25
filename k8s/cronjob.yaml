@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ping-job
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Allow
+  suspend: false
+  successfulJobsHistoryLimit: 10
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 60
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: busybox
+            image: busybox:1.28
+            imagePullPolicy: IfNotPresent
+            command:
+            - nslookup
+            - gms-task
+          restartPolicy: OnFailure

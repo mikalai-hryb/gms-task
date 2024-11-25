@@ -1,0 +1,7 @@
+tf/.terraform/
+tf/.terraform.tfstate.lock.info
+tf/terraform.tfstate
+tf/terraform.tfstate.backup
+
+kind.zip
+k8s.zip

@@ -1,0 +1,108 @@
+- name: GMS Task Play
+  hosts: all
+  become: true
+  vars:
+    lock_file_path: /tmp/ansible-playbook.lock
+  pre_tasks:
+    - name: Check if lock file exists
+      stat:
+        path: "{{ lock_file_path }}"
+      register: lock_file
+
+    - block:
+        - name: "end play "
+          debug:
+            msg: "playbook already launched, ending play"
+
+        - meta: end_play
+      when: lock_file.stat.exists
+
+    - name: create lock_file {{ lock_file_path }}
+      ansible.builtin.file:
+        path: "{{ lock_file_path }}"
+        state: touch
+
+  tasks:
+    - name: Wait until the docker is available
+      ansible.builtin.wait_for:
+        path: /usr/bin/docker
+
+    - name: Wait until instance is ready
+      ansible.builtin.pause:
+        minutes: 1
+
+    - name: Show variables
+      ansible.builtin.debug:
+       msg: "account_id: {{ account_id }}, region_name: {{ region_name }}, kind_s3_path: {{ kind_s3_path }}, k8s_s3_path: {{ k8s_s3_path }},"
+
+    - name: Login to ECR
+      ansible.builtin.shell: "aws ecr get-login-password --region {{ region_name }} | docker login --username AWS --password-stdin {{ account_id }}.dkr.ecr.{{ region_name }}.amazonaws.com"
+
+    - name: Pull Docker Image
+      ansible.builtin.shell: "docker pull {{ account_id }}.dkr.ecr.{{ region_name }}.amazonaws.com/{{ image_name }}:{{ image_tag }}"
+
+    - name: Installing Kubectl
+      ansible.builtin.shell: |
+        [ $(uname -m) = x86_64 ]  && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        [ $(uname -m) = aarch64 ] && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl"
+
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+    - name: Installing Kind
+      ansible.builtin.shell: |
+        [ $(uname -m) = x86_64 ] && curl -Lo ./kind-tool https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
+        [ $(uname -m) = aarch64 ] && curl -Lo ./kind-tool https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-arm64
+        chmod +x ./kind-tool
+        sudo mv ./kind-tool /usr/local/bin/kind
+
+    - name: Download configurations
+      ansible.builtin.shell: |
+        aws s3 cp s3://{{ kind_s3_path }} kind.zip && unzip -d kind -o kind.zip && \
+        aws s3 cp s3://{{ k8s_s3_path }}  k8s.zip  && unzip -d k8s  -o k8s.zip
+
+    - name: Provision Kind Cluster
+      ansible.builtin.shell: |
+        KIND_CLUSTER_NAME=$(sudo kind get clusters | grep gms)
+        [ "$KIND_CLUSTER_NAME" != "gms-task" ] && sudo kind create cluster --name gms-task --config kind/config.yaml
+        # mkdir -p ~/.kube
+        # kind get kubeconfig --name gms-task > ~/.kube/config
+        # kind export kubeconfig --name gms-task
+        # whoami
+        echo $KIND_CLUSTER_NAME
+
+    - name: Install Ingress
+      ansible.builtin.shell: |
+        sudo kubectl apply -f https://kind.sigs.k8s.io/examples/ingress/deploy-ingress-nginx.yaml --validate=false && \
+        sudo kubectl apply -f https://kind.sigs.k8s.io/examples/ingress/deploy-ingress-nginx.yaml --validate=false
+        # whoami
+
+    - name: Wait until ingress is ready
+      ansible.builtin.pause:
+        minutes: 1
+
+    - name: Recreate Kind Cluster
+      ansible.builtin.shell: |
+        if [ -f "k8s.zip" ]; then
+          echo "Skipping recreating..."
+        else
+          echo "Recreating cluster"
+          sudo kind delete cluster --name gms-task && \
+          sudo kind create cluster --name gms-task --config kind/config.yaml && \
+          sudo kubectl apply -f https://kind.sigs.k8s.io/examples/ingress/deploy-ingress-nginx.yaml --validate=false
+        fi
+
+    - name: Upload Docker Image to Kind Cluster
+      ansible.builtin.shell: |
+        sudo kind load docker-image --name gms-task {{ account_id }}.dkr.ecr.{{ region_name }}.amazonaws.com/{{ image_name }}:{{ image_tag }}
+
+    - name: Install App
+      ansible.builtin.shell: |
+        sudo kubectl apply -f k8s && \
+        sudo kubectl apply -f k8s/ingress.yaml && \
+        sudo kubectl set image deployment/gms-task app={{ account_id }}.dkr.ecr.{{ region_name }}.amazonaws.com/{{ image_name }}:{{ image_tag }}
+
+  post_tasks:
+    - name: delete the lock file  {{ lock_file_path }}
+      file:
+        path: "{{ lock_file_path }}"
+        state: absent
